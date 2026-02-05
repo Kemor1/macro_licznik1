@@ -7,11 +7,61 @@ type PhotoUploadAreaProps = {
   onFileChange?: (file: File | null) => void;
 };
 
+// --- FUNKCJA KOMPRESUJĄCA ZDJĘCIA ---
+const compressImage = async (file: File): Promise<File> => {
+  return new Promise((resolve) => {
+    // Jeśli plik jest mały (poniżej 1MB), nie ruszamy go
+    if (file.size < 1024 * 1024) {
+      resolve(file);
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const MAX_WIDTH = 1024; // Zmniejszamy szerokość do max 1024px
+        const scaleSize = MAX_WIDTH / img.width;
+        
+        // Jeśli zdjęcie jest już mniejsze niż limit, zostawiamy wymiary
+        const finalScale = scaleSize < 1 ? scaleSize : 1;
+        
+        canvas.width = img.width * finalScale;
+        canvas.height = img.height * finalScale;
+
+        const ctx = canvas.getContext("2d");
+        ctx?.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // Kompresja do JPEG z jakością 70%
+        canvas.toBlob(
+          (blob) => {
+            if (blob) {
+              const newFile = new File([blob], file.name, {
+                type: "image/jpeg",
+                lastModified: Date.now(),
+              });
+              resolve(newFile);
+            } else {
+              resolve(file); // W razie błędu zwróć oryginał
+            }
+          },
+          "image/jpeg",
+          0.7
+        );
+      };
+    };
+  });
+};
+
 export function PhotoUploadArea({ onFileChange }: PhotoUploadAreaProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
+  const [isCompressing, setIsCompressing] = useState(false); // Nowy stan ładowania
 
-  // Sprzątanie URL-i przy odmontowaniu (dobre praktyki)
+  // Sprzątanie URL-i
   useEffect(() => {
     return () => {
       if (preview) URL.revokeObjectURL(preview);
@@ -19,21 +69,41 @@ export function PhotoUploadArea({ onFileChange }: PhotoUploadAreaProps) {
   }, [preview]);
 
   const handleFile = useCallback(
-    (file: File | null) => {
-      // 1. Logika walidacji i wywołania rodzica (TERAZ NA ZEWNĄTRZ setPreview)
+    async (file: File | null) => {
       if (file && !file.type.startsWith("image/")) return;
 
-      // Najpierw informujemy rodzica o zmianie (bezpiecznie)
-      if (onFileChange) {
-        onFileChange(file);
+      if (!file) {
+        onFileChange?.(null);
+        setPreview((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return null;
+        });
+        return;
       }
 
-      // 2. Aktualizacja lokalnego podglądu
+      // 1. Pokazujemy podgląd od razu (oryginał), żeby użytkownik nie czekał
+      const objectUrl = URL.createObjectURL(file);
       setPreview((prev) => {
-        if (prev) URL.revokeObjectURL(prev); // Sprzątamy stary podgląd
-        if (!file) return null;
-        return URL.createObjectURL(file);
+        if (prev) URL.revokeObjectURL(prev);
+        return objectUrl;
       });
+
+      // 2. Włączamy tryb kompresji
+      setIsCompressing(true);
+
+      try {
+        // 3. Zmniejszamy plik
+        const compressedFile = await compressImage(file);
+        
+        // 4. Wysyłamy zmniejszony plik do rodzica
+        onFileChange?.(compressedFile);
+      } catch (err) {
+        console.error("Błąd kompresji", err);
+        // Jak coś pójdzie nie tak, wyślij oryginał
+        onFileChange?.(file);
+      } finally {
+        setIsCompressing(false);
+      }
     },
     [onFileChange]
   );
@@ -98,15 +168,26 @@ export function PhotoUploadArea({ onFileChange }: PhotoUploadAreaProps) {
       >
         {preview ? (
           <>
-            <img
-              src={preview}
-              alt="Podgląd"
-              className="max-h-[260px] w-auto object-contain rounded-xl"
-            />
+            <div className="relative">
+              <img
+                src={preview}
+                alt="Podgląd"
+                className={`max-h-[260px] w-auto object-contain rounded-xl ${isCompressing ? "opacity-50" : ""}`}
+              />
+              {isCompressing && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="bg-black/50 text-white px-3 py-1 rounded-full text-xs animate-pulse">
+                    Przetwarzanie...
+                  </div>
+                </div>
+              )}
+            </div>
+            
             <button
               type="button"
               onClick={() => handleFile(null)}
               className="mt-3 text-sm text-accent-lime hover:text-accent-lime-bright"
+              disabled={isCompressing}
             >
               Usuń zdjęcie
             </button>
